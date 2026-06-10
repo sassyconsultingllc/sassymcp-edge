@@ -28,6 +28,10 @@ this.server.tool("my_tool", "Description.", { arg: z.string() }, async ({ arg })
 
 Brute-forcing the approval form is impractical against a 256-bit random key, but you can additionally put a Cloudflare WAF rate-limiting rule on `/authorize` for defense in depth.
 
+### Trust model: single-tenant
+
+Each MCP *session* gets its own Durable Object, so concurrent clients never interfere with each other at the protocol level — but there is exactly one identity. Anyone holding the access key (or an OAuth grant approved with it) is "the owner" and shares the same memory store. This is deliberate: it's a personal server. Don't hand your key out — each person deploys their own instance on their own Cloudflare account.
+
 ## Deploy your own
 
 ```bash
@@ -39,10 +43,13 @@ npm install
 npx wrangler kv namespace create MEMORY
 npx wrangler kv namespace create OAUTH
 
-# 2. Generate and set your access token (any high-entropy string)
+# 2. Deploy, then set your two secrets (each a 64-hex-char / 32-byte random value)
 npx wrangler deploy
-npx wrangler secret put MCP_AUTH_TOKEN
+npx wrangler secret put MCP_AUTH_TOKEN     # client access key
+npx wrangler secret put MEMORY_ENC_KEY     # AES-256 key for memory encryption at rest
 ```
+
+Keep a copy of `MEMORY_ENC_KEY` somewhere safe — if it's lost, encrypted memory values are unrecoverable.
 
 PowerShell token generation, if you want one made properly:
 
@@ -92,6 +99,7 @@ claude mcp add --transport http edge-mcp https://<your-endpoint>/mcp --header "A
 ## Security posture
 
 - Fail-closed auth on every MCP route; timing-safe key comparison everywhere the key is checked
+- Memory values are AES-256-GCM encrypted at rest (random IV per write) with a server-held secret — ciphertext is what sits in KV and what the Cloudflare dashboard shows; `memory_set` refuses to store plaintext if `MEMORY_ENC_KEY` is unset. Key *names* stay plaintext so prefix listing works — don't put secrets in key names.
 - OAuth state in a dedicated KV namespace; tokens and grants managed by `workers-oauth-provider` (codes are single-use, PKCE enforced)
 - Security headers (CSP, nosniff, frame-deny, no-referrer, no-store) on all HTML/plain responses
 - All user-supplied values HTML-escaped on the authorization page

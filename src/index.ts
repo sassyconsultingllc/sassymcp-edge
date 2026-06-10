@@ -8,7 +8,45 @@ export interface Env {
   OAUTH_KV: KVNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   MCP_AUTH_TOKEN?: string;
+  MEMORY_ENC_KEY?: string;
   OAUTH_PROVIDER: OAuthHelpers;
+}
+
+const ENC_PREFIX = "enc1:";
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.trim();
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function bytesToB64(buf: ArrayBuffer | Uint8Array): string {
+  const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let s = "";
+  for (const c of u) s += String.fromCharCode(c);
+  return btoa(s);
+}
+
+function b64ToBytes(s: string): Uint8Array {
+  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+
+async function importMemoryKey(env: Env): Promise<CryptoKey | null> {
+  if (!env.MEMORY_ENC_KEY || !/^[0-9a-fA-F]{64}$/.test(env.MEMORY_ENC_KEY.trim())) return null;
+  return crypto.subtle.importKey("raw", hexToBytes(env.MEMORY_ENC_KEY), "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+async function encryptValue(key: CryptoKey, plaintext: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
+  return ENC_PREFIX + bytesToB64(iv) + ":" + bytesToB64(ct);
+}
+
+async function decryptValue(key: CryptoKey, stored: string): Promise<string> {
+  const [ivB64, ctB64] = stored.slice(ENC_PREFIX.length).split(":");
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64ToBytes(ivB64) }, key, b64ToBytes(ctB64));
+  return new TextDecoder().decode(pt);
 }
 
 function text(data: unknown) {
@@ -23,7 +61,13 @@ function text(data: unknown) {
 }
 
 export class SassyEdgeMCP extends McpAgent<Env> {
-  server = new McpServer({ name: "sassymcp-edge", version: "1.1.0" });
+  server = new McpServer({ name: "sassymcp-edge", version: "1.2.0" });
+
+  private memKey: Promise<CryptoKey | null> | null = null;
+
+  private getMemKey(): Promise<CryptoKey | null> {
+    return (this.memKey ??= importMemoryKey(this.env));
+  }
 
   async init() {
     this.server.tool(
@@ -35,25 +79,41 @@ export class SassyEdgeMCP extends McpAgent<Env> {
 
     this.server.tool(
       "memory_set",
-      "Store a value in persistent edge memory (Cloudflare KV). Survives across sessions and devices. Optional TTL.",
+      "Store a value in persistent edge memory (Cloudflare KV, AES-256-GCM encrypted at rest). Survives across sessions and devices. Optional TTL.",
       {
         key: z.string().min(1).max(512),
         value: z.string(),
         ttl_seconds: z.number().int().min(60).optional(),
       },
       async ({ key, value, ttl_seconds }) => {
-        await this.env.MEMORY.put(key, value, ttl_seconds ? { expirationTtl: ttl_seconds } : undefined);
-        return text({ stored: key, ttl_seconds: ttl_seconds ?? null });
+        const encKey = await this.getMemKey();
+        if (!encKey) {
+          return text({ error: "MEMORY_ENC_KEY secret is not set (expects 64 hex chars / 32 bytes). Refusing to store plaintext." });
+        }
+        const stored = await encryptValue(encKey, value);
+        await this.env.MEMORY.put(key, stored, ttl_seconds ? { expirationTtl: ttl_seconds } : undefined);
+        return text({ stored: key, encrypted: true, ttl_seconds: ttl_seconds ?? null });
       },
     );
 
     this.server.tool(
       "memory_get",
-      "Read a value from persistent edge memory.",
+      "Read a value from persistent edge memory (decrypted transparently).",
       { key: z.string().min(1).max(512) },
       async ({ key }) => {
-        const value = await this.env.MEMORY.get(key);
-        return text(value === null ? { key, found: false } : { key, found: true, value });
+        const raw = await this.env.MEMORY.get(key);
+        if (raw === null) return text({ key, found: false });
+        if (!raw.startsWith(ENC_PREFIX)) {
+          // Legacy plaintext entry from before encryption-at-rest was added.
+          return text({ key, found: true, value: raw, encrypted: false });
+        }
+        const encKey = await this.getMemKey();
+        if (!encKey) return text({ key, found: true, error: "MEMORY_ENC_KEY secret is not set; cannot decrypt." });
+        try {
+          return text({ key, found: true, value: await decryptValue(encKey, raw) });
+        } catch {
+          return text({ key, found: true, error: "Decryption failed — MEMORY_ENC_KEY does not match the key this value was written with." });
+        }
       },
     );
 
