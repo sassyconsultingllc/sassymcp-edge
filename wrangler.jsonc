@@ -1,0 +1,40 @@
+// Template config. Create your two KV namespaces and paste their IDs below:
+//   npx wrangler kv namespace create MEMORY
+//   npx wrangler kv namespace create OAUTH
+// Then set your access token and deploy:
+//   npx wrangler secret put MCP_AUTH_TOKEN
+//   npx wrangler deploy
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sassymcp-edge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SassyEdgeMCP"]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "SassyEdgeMCP"
+      }
+    ]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "MEMORY",
+      "id": "REPLACE_WITH_YOUR_MEMORY_NAMESPACE_ID"
+    },
+    {
+      "binding": "OAUTH_KV",
+      "id": "REPLACE_WITH_YOUR_OAUTH_NAMESPACE_ID"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
