@@ -1,8 +1,10 @@
 // Template config. Create your two KV namespaces and paste their IDs below:
 //   npx wrangler kv namespace create MEMORY
 //   npx wrangler kv namespace create OAUTH
-// Then set your access token and deploy:
-//   npx wrangler secret put MCP_AUTH_TOKEN
+// Then set your secrets and deploy:
+//   npx wrangler secret put MCP_AUTH_TOKEN   # owner bearer (maps to userId "owner")
+//   npx wrangler secret put MEMORY_ENC_KEY   # 64 hex chars / 32 bytes (AES-256 at rest)
+//   npx wrangler secret put RESEND_API_KEY   # only if you enable email provisioning
 //   npx wrangler deploy
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -34,6 +36,20 @@
       "id": "REPLACE_WITH_YOUR_OAUTH_NAMESPACE_ID"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "DOWNLOADS",
+      "bucket_name": "REPLACE_WITH_YOUR_R2_BUCKET_NAME"
+    }
+  ],
+  // Multi-tenant provisioning settings (safe to commit — no secrets here).
+  "vars": {
+    "PROVISION_FROM": "SassyMCP Edge <mcp@example.com>",
+    "PUBLIC_BASE_URL": "https://sassymcp-edge.<your-subdomain>.workers.dev",
+    "TOKEN_TTL_DAYS": "30",
+    "MAX_USERS": "500",
+    "ALLOWLIST_ONLY": "0"
+  },
   "observability": {
     "enabled": true
   }

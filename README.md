@@ -1,6 +1,11 @@
+<!--
+   Copyright (c) 2026 Shane Smith / Sassy Consulting LLC. All rights reserved.
+   Proprietary source. This notice is Copyright Management Information (17 U.S.C. 1202); removal or alteration prohibited.
+   CodeMark: SCLLC1-sassymcp_edge-U4DF5UOLUULT
+-->
 # sassymcp-edge
 
-A personal MCP server that runs entirely on Cloudflare — no VPS, no tunnel, no machine that has to stay on. Built on the [Agents SDK](https://developers.cloudflare.com/agents/): each MCP session runs in a SQLite-backed Durable Object (`McpAgent`), persistent state lives in Workers KV, and the whole thing deploys with one `wrangler deploy`.
+A multi-tenant MCP server that runs entirely on Cloudflare — no VPS, no tunnel, no machine that has to stay on. Each user gets a private, isolated instance, provisioned by email. Built on the [Agents SDK](https://developers.cloudflare.com/agents/): each MCP session runs in a SQLite-backed Durable Object (`McpAgent`), persistent state lives in Workers KV, and the whole thing deploys with one `wrangler deploy`.
 
 Works with Claude Code, Claude Desktop, claude.ai connectors, Cursor, and any other MCP client that speaks streamable HTTP (or legacy SSE).
 
@@ -9,7 +14,7 @@ Works with Claude Code, Claude Desktop, claude.ai connectors, Cursor, and any ot
 | Tool | Backing | Purpose |
 |---|---|---|
 | `ping` | — | Liveness check, returns server time |
-| `memory_set` / `memory_get` / `memory_list` / `memory_delete` | Workers KV | Persistent key/value memory shared across all your devices and sessions; `memory_list` pages through the entire keyspace |
+| `memory_set` / `memory_get` / `memory_list` / `memory_delete` | Workers KV | Persistent key/value memory, private per access token and isolated between users; `memory_list` pages through your own keyspace |
 | `fetch_url` | edge `fetch()` | HTTP request from Cloudflare's network — full status, headers, and body |
 
 Adding your own tool is one block in [src/index.ts](src/index.ts) inside `init()`:
@@ -21,16 +26,24 @@ this.server.tool("my_tool", "Description.", { arg: z.string() }, async ({ arg })
 });
 ```
 
-## Auth — two paths, both supported simultaneously
+## Auth — per-user tokens, two transports
 
-1. **Static bearer token** — for clients you configure by hand (Claude Code, Claude Desktop, Cursor). A single 256-bit key in the `MCP_AUTH_TOKEN` secret, compared timing-safe. The server fails closed: no secret set, no access.
-2. **OAuth 2.1** — for clients that require an OAuth dance (claude.ai connectors). Implemented with [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider): dynamic client registration, PKCE, refresh tokens. The authorization page asks for your server access key (the same `MCP_AUTH_TOKEN` value), so only the key holder can approve a client.
+Every request resolves to an identity (`userId`) before it reaches a tool, and memory is namespaced per identity (`mem:<userId>:…`), so users never see each other's data.
 
-Brute-forcing the approval form is impractical against a 256-bit random key, but you can additionally put a Cloudflare WAF rate-limiting rule on `/authorize` for defense in depth.
+1. **Bearer token** — each user gets a unique 256-bit token (issued by email, below), sent as `Authorization: Bearer <token>`, resolved against `OAUTH_KV` and compared timing-safe. The owner token (`MCP_AUTH_TOKEN`) still works and maps to `userId "owner"`.
+2. **OAuth 2.1** — for clients that require the OAuth dance (claude.ai connectors). Implemented with [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider): DCR, PKCE, refresh tokens. The authorization page asks for the user's own issued token; the resulting grant carries that user's identity.
 
-### Trust model: single-tenant
+The server fails closed — an unrecognized or expired token gets no access. Consider a Cloudflare WAF rate-limiting rule on `/authorize` for defense in depth.
 
-Each MCP *session* gets its own Durable Object, so concurrent clients never interfere with each other at the protocol level — but there is exactly one identity. Anyone holding the access key (or an OAuth grant approved with it) is "the owner" and shares the same memory store. This is deliberate: it's a personal server. Don't hand your key out — each person deploys their own instance on their own Cloudflare account.
+## Provisioning — request a token by email
+
+Point a Cloudflare Email Routing address (e.g. `mcp@your-domain`) at this Worker. On inbound mail the `email()` handler derives a stable `userId` from the sender, mints a unique token into `OAUTH_KV` (TTL `TOKEN_TTL_DAYS`, default 30), and emails the token plus ready-to-paste client config back **to the sender** via Resend (`RESEND_API_KEY` + `PROVISION_FROM`).
+
+Because the token is only ever sent to the envelope sender's mailbox, a spoofed `From` can't receive a usable token — receiving the reply *is* the verification. Guards: one mint per sender per 24h (a repeat re-sends the existing token), a soft global cap (`MAX_USERS`), and an optional allowlist (`ALLOWLIST_ONLY=1` requires an `allow:<email>` KV entry). Re-emailing rotates to a fresh token while preserving the same private memory.
+
+### Trust model: multi-tenant, isolated per token
+
+Each MCP *session* still gets its own Durable Object, and on top of that each *user* has a distinct `userId` and a private, namespaced memory keyspace. Hand out tokens freely — one per person. Revoking a user is a single `OAUTH_KV` delete of their `token:` / `user:` keys.
 
 ## Deploy your own
 
